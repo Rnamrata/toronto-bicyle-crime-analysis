@@ -1,0 +1,1100 @@
+---
+title: "DATA*6500 Course Project Report"
+author: "Evan Switzer, Namrata Roy"
+date: "2024-08-16"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+library(dplyr)
+library(tmap)
+library(osmdata)
+library(sf)
+library(rosm)
+library(tmaptools)
+library(ggplot2)
+library(tinytex)
+library(tidyr)
+library(leaflet)
+library(spatstat)
+library(raster)
+library(spdep)
+library(lubridate)
+library(INLA)
+library(caret)
+library(randomForest)
+library(xgboost)
+```
+
+# Introduction
+
+Bicycle theft is a widespread problem in urban areas, and Toronto, one of Canada's largest and most lively cities, is no exception. As cycling becomes an increasingly popular mode of transportation for commuting and recreation, the frequency of bicycle thefts has risen, causing significant concern among residents, policymakers, and law enforcement agencies [1]. Toronto's dense urban layout, varied neighbourhoods, and extensive public transit system contribute to the complexity of the problem, making it challenging to implement effective preventive measures [2]. 
+
+The city's dedication to promoting cycling as a sustainable and healthy transportation option is evident in its expanding network of bike lanes and cycling infrastructure [3]. However, the surge in bicycle theft poses a threat to these efforts, deterring potential cyclists and undermining public confidence in the safety and security of cycling in Toronto [4]. The financial impact of bicycle theft, coupled with the emotional distress experienced by victims, emphasizes the need for comprehensive strategies to address this issue. 
+
+Understanding the spatial and temporal patterns of bicycle theft, the socio-economic factors influencing theft rates, and the effectiveness of existing prevention measures is crucial for developing targeted interventions [2]. The goal of this paper is to gain an understanding of the factors contributing to bicycle theft in Toronto. The aim is to analyze crime patterns of bike thefts in Toronto, focusing on locations such as subway stations, bus stops, bicycle parking, etc. While our initial focus was board and included assault, auto theft, and auto theft we felt we could provide more value by focusing on bike thefts.We seek to uncover trends in bike thefts across Toronto neighbourhoods and draw valuable insights based on location from the data. 
+
+# Data Sources
+
+We mainly used 3 datasets; Bicycle Thefts[5], Ward Profiles - Census Data[9], and Ward Profiles -  Geographic Areas[9]. This data gave us all of the information we needed on bike thefts, population, and geographic areas of Toronto.
+
+The Bicycle Thefts dataset contained detailed information on exactly where and when the bike was stolen. It also conatined extra information such as the price, make, and model of the bike, although not all of this information was filled. There are a total of 35325 records in this dataset with 35 features.
+
+The Ward Profiles datasets contained information on the population and geographic areas of Toronto. The population dataset contained how many people lived in each ward slpit up into 5 year buckets, along with the total for each ward. Since we don't care about age we just took the total of each ward. The geographic areas dataset contained the area of each ward in square kilometers. We used this data to calculate the population density of each ward.
+
+To supplement our data we used OpenStreetMaps to retrieve bus stops, subway stations, and bike parking stands in Toronto. This data was mainly used to analyze the proximity of bike thefts to these locations. OpenStreetMaps also let us get a layout of Toronto's wards which we used to plot the data on a map.
+
+We also used a Major Crime Indicators [6] and Neighbourhood Crime Rates [7] at the begining before narrowing down our focus to have better analysis.
+
+# Data Pre-Processing
+
+The data was decently clean when we got it, but it was missing information we wanted which we got from OpenStreetMap. These were the bus stops, subway stations, and bike parking stands. We also had to calculate the population density of each ward. Most data was merged together based on the ward_id. The OCC_DATE contained a date string that was split into hour, day, month, year. There were a handful of rows with mostly NA values which were removed. The BIKE_COST column had some NA values which were replaced with the mean of the column. We considered replacing them with 0 as a missing value may mean that the owner did not value their bike.
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#input data
+NeighbourhoodCrimeRates = read.csv("Neighbourhood_Crime_Rates_Open_Data.csv")
+
+MajorCrimeIndicators = read.csv("Major_Crime_Indicators_Open_Data.csv")
+
+BicycleThefts = read.csv("Bicycle_Thefts_Open_Data.csv")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#for BicycleThefts plot each occurance of BIKE_COST
+ggplot(BicycleThefts, aes(x = BIKE_COST)) +
+  geom_histogram(binwidth = 100,color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Bike Costs",
+       x = "Bike Cost ($)",
+       y = "Count") +
+  theme_minimal()
+
+print(summary(BicycleThefts$BIKE_COST))
+#replace na with mean
+BicycleThefts$BIKE_COST[is.na(BicycleThefts$BIKE_COST)] <- mean(BicycleThefts$BIKE_COST, na.rm = TRUE)
+
+BicycleThefts <- BicycleThefts |>
+  filter_all(all_vars(. != "NSA"))
+
+#print number of 0s, 0s are left because some bikes are actually worth very little (like my bike)
+print(sum(BicycleThefts$BIKE_COST == 0))
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#barplot of BIKE_TYPE
+ggplot(BicycleThefts, aes(x = BIKE_TYPE)) +
+  geom_bar() +
+  labs(title = "Bike Types",
+       x = "Bike Type",
+       y = "Count") +
+  theme_minimal()
+
+#barplot of BIKE_COLOUR
+ggplot(BicycleThefts, aes(x = BIKE_COLOUR)) +
+  geom_bar() +
+  labs(title = "Bike Colours",
+       x = "Bike Colour",
+       y = "Count") +
+  theme_minimal()
+
+#barplot of BIKE_MAKE
+ggplot(BicycleThefts, aes(x = BIKE_MAKE)) +
+  geom_bar() +
+  labs(title = "Bike Makes",
+       x = "Bike Make",
+       y = "Count") +
+  theme_minimal()
+
+#barplot of BIKE_MODEL
+ggplot(BicycleThefts, aes(x = BIKE_MODEL)) +
+  geom_bar() +
+  labs(title = "Bike Models",
+       x = "Bike Model",
+       y = "Count") +
+  theme_minimal()
+
+#barplot of BIKE_SPEED
+ggplot(BicycleThefts, aes(x = BIKE_SPEED)) +
+  geom_bar() +
+  labs(title = "Bike Speeds",
+       x = "Bike Speed",
+       y = "Count") +
+  theme_minimal()
+
+#barplot of PREMISES_TYPE
+ggplot(BicycleThefts, aes(x = PREMISES_TYPE)) +
+  geom_bar() +
+  labs(title = "Premises Types",
+       x = "Premises Type",
+       y = "Count") +
+  theme_minimal()
+
+#barplot of LOCATION_TYPE
+ggplot(BicycleThefts, aes(x = LOCATION_TYPE)) +
+  geom_bar() +
+  labs(title = "Location Types",
+       x = "Location Type",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#barplot of primary_offence
+ggplot(BicycleThefts, aes(x = PRIMARY_OFFENCE)) +
+  geom_bar() +
+  labs(title = "Primary Offences",
+       x = "Primary Offence",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#for location types plot top 10
+BicycleThefts %>%
+  count(LOCATION_TYPE) %>%
+  arrange(desc(n)) %>%
+  head(10) %>%
+  ggplot(aes(x = reorder(LOCATION_TYPE, n), y = n)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 10 Location Types for Bike Thefts",
+       x = "Location Type",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8))
+
+#for primary offence plot top 5
+BicycleThefts %>%
+  count(PRIMARY_OFFENCE) %>%
+  arrange(desc(n)) %>%
+  head(5) %>%
+  ggplot(aes(x = reorder(PRIMARY_OFFENCE, n), y = n)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Top 5 Primary Offences for Bike Thefts",
+       x = "Primary Offence",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 8))
+
+
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+
+# Parse OCC_DATE to POSIXct
+BicycleThefts <- BicycleThefts %>%
+  mutate(OCC_DATE = ymd_hms(OCC_DATE))
+
+#for bike thefts remove any with OCC_YEAR less than 2014, greater than or equal to 2024, or NA
+BicycleThefts <- BicycleThefts %>%
+  filter(!is.na(OCC_YEAR), OCC_YEAR >= 2014, OCC_YEAR < 2024)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+
+
+#create days from start of 2014 for each theft
+BicycleThefts$OCC_DATE_FROM2014 <- as.numeric(difftime(BicycleThefts$OCC_DATE, as.Date("2014-01-01"), units = "days"))
+
+#summarize thefts per day
+BicycleTheftsPerDay <- BicycleThefts %>%
+  group_by(OCC_DATE_FROM2014) %>%
+  summarize(thefts = n()) 
+
+#summarize thefts per month per year
+BicycleTheftsPerMonth <- BicycleThefts %>%
+  mutate(OCC_MONTH = month(OCC_DATE)) %>%
+  group_by(OCC_MONTH, OCC_YEAR) %>%
+  summarize(thefts = n()) 
+
+BicycleTheftsPerMonth <- BicycleTheftsPerMonth %>%
+  mutate(YearMonth = make_date(OCC_YEAR, OCC_MONTH, 1))
+
+BicycleTheftsPerMonth$time_id <- as.integer(as.factor(BicycleTheftsPerMonth$YearMonth))
+BicycleTheftsPerMonth$time_id2 <- BicycleTheftsPerMonth$time_id
+
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#get background map of Toronto using openstreetmap
+toronto_bbox = c(left = -79.6392, 
+                 bottom = 43.403221,
+                 right = -79.115952,
+                 top = 43.855457)
+
+toronto_border = opq(toronto_bbox, timeout = 600) |> 
+  add_osm_feature(key = "boundary", value = "administrative") |> 
+  add_osm_feature(key = 'admin_level', value = '6') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)() |>
+  filter(name == "Toronto") |> 
+  dplyr::select()
+
+toronto_ward = opq(toronto_bbox, timeout = 60) |> 
+  add_osm_feature(key = 'admin_level', value = '9') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)()
+
+subwayStops = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'railway', value = 'subway_entrance') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  dplyr::select(name)
+
+#for subway stops add the subway line
+subwayLines = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'railway', value = 'subway') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_lines)() |> 
+  dplyr::select(name)
+
+toronto_subwayLines = subwayLines[toronto_border,, op=st_within]
+
+#for each subwayStop find the subway line
+subwayStops <- subwayStops |>
+  mutate(subwayLineIndex = st_nearest_feature(subwayStops, toronto_subwayLines),
+         subwayLine = toronto_subwayLines$name[subwayLineIndex])
+
+toronto_subwayStops = subwayStops[toronto_border,, op=st_within] 
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#get bus stops from openstreetmap
+busStops = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'highway', value = 'bus_stop') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  dplyr::select(name)
+
+toronto_busStops = busStops[toronto_border,, op=st_within]
+
+#get bike parking from openstreetmap
+bikeParking = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'amenity', value = 'bicycle_parking') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  dplyr::select(name)
+
+toronto_bikeParking = bikeParking[toronto_border,, op=st_within]
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#read in 3 xlsx files for population data (25-WardNames-Numbers, 2023-WardProfiles-GeographicAreas, population)
+wardProfiles = readxl::read_xlsx("2023-WardProfiles-GeographicAreas.xlsx")
+population = readxl::read_xlsx("population.xlsx")
+
+wardProfiles <- wardProfiles |> 
+  mutate(Ward = as.character(Ward))
+
+#change column name of Area (sq km) to Area_sq_km
+wardProfiles <- wardProfiles |> 
+  rename(Area_sq_km = `Area (sq km)`)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#get toronto wards from open street map
+toronto_ward = opq(toronto_bbox, timeout = 60) |> 
+  add_osm_feature(key = 'admin_level', value = '9') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)()
+
+#combine ward names, profiles, population and toronto wards
+toronto_ward_info = toronto_ward |>
+  left_join(wardProfiles, by = c("ref" = "Ward"))
+
+total_population <- t(population)
+total_population <- total_population[-1, ]  # Remove the first row (the header)
+total_population <- as.data.frame(total_population)  # Convert matrix to data frame
+
+# Keep only the first column
+total_population <- total_population[, 1, drop = FALSE]
+
+#remove first row again
+Toronto_pop <- total_population[1, ]
+total_population <- total_population[-1, , drop = FALSE]
+
+# Add Ward column with row numbers as Ward numbers
+total_population$Ward <- 1:nrow(total_population)
+
+# Rename the columns
+colnames(total_population) <- c("Total_Population", "Ward")
+
+#change total_population Ward into character
+total_population$Ward <- as.character(total_population$Ward)
+
+#merge with toronto ward info
+toronto_ward_info = toronto_ward_info |>
+  left_join(total_population, by = c("ref" = "Ward"))
+
+# Convert the columns to numeric if they are not already
+toronto_ward_info$Total_Population <- as.numeric(toronto_ward_info$Total_Population)
+toronto_ward_info$Area_sq_km <- as.numeric(toronto_ward_info$Area_sq_km)
+
+#calculate population density
+toronto_ward_info$Population_Density = toronto_ward_info$Total_Population / toronto_ward_info$Area_sq_km
+
+#remove columns: admin_level, boundary, political_division, type, wikidata, wikipedia, place
+toronto_ward_info <- toronto_ward_info |>
+  dplyr::select(-c(admin_level, boundary, political_division, type, wikidata, wikipedia, place))
+
+#change ref column name to ward_id
+toronto_ward_info <- toronto_ward_info |>
+  rename(ward_id = ref)
+
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+toronto_basemap = tmaptools::read_osm(toronto_border, type='osm', mergeTiles=TRUE) 
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#plot toronto wards with population density
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Population_Density", style = "quantile", palette = "Blues", title = "Population Density (people/sq km)") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot toronto wards with names on each of them
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Population_Density", style = "quantile", palette = "Blues", title = "Population Density (people/sq km)") +
+  tm_text("ward_id", size = 1) +
+  tm_layout(legend.position = c("left", "bottom"))
+
+
+# Convert to sf object
+BicycleThefts_sf <- st_as_sf(BicycleThefts, 
+                             coords = c("LONG_WGS84", "LAT_WGS84"),
+                             crs = 4326)  # Adjust the CRS as needed
+
+
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#for each BicycleTheft, find the neighbourhood that each observation is in and add it to the data
+BicycleThefts_with_wards <- st_join(BicycleThefts_sf, toronto_ward_info)
+
+
+#aggregate counts of theft by ward
+BicycleThefts_by_ward <- BicycleThefts_with_wards %>%
+  group_by(ward_id) %>%
+  summarize(thefts = n())
+
+#join with toronto ward info
+toronto_ward_info <- st_join(toronto_ward_info, BicycleThefts_by_ward, left = TRUE)
+#drop ward_id.x
+toronto_ward_info <- toronto_ward_info |>
+  dplyr::select(-c(ward_id.x))
+#rename ward_id.y to ward_id
+toronto_ward_info <- toronto_ward_info |>
+  rename(ward_id = ward_id.y)
+
+#calculate thefts per person
+toronto_ward_info$Thefts_per_person = toronto_ward_info$thefts / toronto_ward_info$Total_Population
+
+#calculate thefts per sq km
+toronto_ward_info$Thefts_per_sq_km = toronto_ward_info$thefts / toronto_ward_info$Area_sq_km
+
+#calculate thefts per pop density
+toronto_ward_info$Thefts_per_pop_density = toronto_ward_info$thefts / toronto_ward_info$Population_Density
+
+
+
+#plot thefts by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "thefts", style = "cont", palette = "Blues", title = "Thefts") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot thefts by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "thefts", style = "quantile", palette = "Blues", title = "Thefts") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot thefts per person by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_person", style = "cont", palette = "Blues", title = "Thefts per Person") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot thefts per person by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_person", style = "quantile", palette = "Blues", title = "Thefts per Person") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot thefts per sq km by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_sq_km", style = "cont", palette = "Blues", title = "Thefts per sq km") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot thefts per sq km by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_sq_km", style = "quantile", palette = "Blues", title = "Thefts per sq km") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+
+#plot thefts per pop density by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_pop_density", style = "cont", palette = "Blues", title = "Thefts per Population Density") +
+  tm_layout(legend.position = c("left", "bottom"))
+
+#plot thefts per pop density by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_pop_density", style = "quantile", palette = "Blues", title = "Thefts per Population Density") +
+  tm_layout(legend.position = c("left", "bottom")) +
+   tm_layout(
+    legend.position = c("left", "bottom"),  # Move legend to left and bottom
+    legend.outside = TRUE,  # Move legend outside of the plot area
+    legend.outside.position = "right",  # Position the legend outside to the right
+    legend.outside.size = 0.3  # Adjust the size of the legend (optional)
+  )
+
+
+
+```
+
+```{r, fig.cap = "Population density of Toronto's wards with bicycle thefts locations overlaid."}
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Population_Density", style = "quantile", palette = "Blues", title = "Population Density (people/sq km)") +
+  tm_shape(BicycleThefts_sf) +
+  tm_dots(col = "black", size = 0.1, alpha = 0.05) +
+   tm_layout(
+    legend.position = c("left", "bottom"),  # Move legend to left and bottom
+    legend.outside = TRUE,  # Move legend outside of the plot area
+    legend.outside.position = "right",  # Position the legend outside to the right
+    legend.outside.size = 0.3  # Adjust the size of the legend (optional)
+  )
+
+
+```
+
+```{r, fig.cap = "Thefts per Population Density by Ward."}
+#plot thefts per pop density by ward
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_pop_density", style = "quantile", palette = "Blues", title = "Thefts per Population Density") +
+  tm_layout(legend.position = c("left", "bottom")) +
+  tm_text("ward_id", size = 1) +
+   tm_layout(
+    legend.position = c("left", "bottom"),  # Move legend to left and bottom
+    legend.outside = TRUE,  # Move legend outside of the plot area
+    legend.outside.position = "right",  # Position the legend outside to the right
+    legend.outside.size = 0.3  # Adjust the size of the legend (optional)
+  )
+
+```
+
+```{r, fig.cap = "Subway Stops and Lines in Toronto."}
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_subwayStops) +
+  tm_dots(col = "subwayLine", size = 0.2, legend.show = FALSE, palette = "Set1") +
+  tm_shape(toronto_subwayLines) +
+  tm_lines(col = "name", size = 0.5, legend.show = TRUE, palette = "Set1", col.title="Subway Line") + 
+   tm_layout(
+    legend.position = c("left", "bottom"),  # Move legend to left and bottom
+    legend.outside = TRUE,  # Move legend outside of the plot area
+    legend.outside.position = "right",  # Position the legend outside to the right
+    legend.outside.size = 0.3  # Adjust the size of the legend (optional)
+  )
+```
+
+```{r, fig.cap = "Bus Stops in Toronto on top of Thefts per Population Density."}
+#plot toronto bike parking with thefts per pop density by ward under
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_pop_density", style = "quantile", palette = "Blues", title = "Thefts per Population Density") +
+  tm_shape(toronto_bikeParking) +
+  tm_dots(size = 0.2, legend.show = FALSE, palette = "Set2", alpha = 0.25) +
+   tm_layout(
+    legend.position = c("left", "bottom"),  # Move legend to left and bottom
+    legend.outside = TRUE,  # Move legend outside of the plot area
+    legend.outside.position = "right",  # Position the legend outside to the right
+    legend.outside.size = 0.3  # Adjust the size of the legend (optional)
+  )
+```
+
+
+
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE, fig.cap = "Background raster displaying Toronto's subway stops."}
+# Plot Toronto basemap with subway stops, each colour relates to it's line, plot black line for each subway line too
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_subwayStops) +
+  tm_dots(col = "subwayLine", size = 0.2, legend.show = FALSE, palette = "Set1") +
+  tm_shape(toronto_subwayLines) +
+  tm_lines(col = "name", size = 0.5, legend.show = FALSE, palette = "Set1", col.title="Subway Line")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#plot toronto bus stops
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_busStops) +
+  tm_dots(col = "name", size = 0.2, legend.show = FALSE, palette = "Set1")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#plot toronto bike parking
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_bikeParking) +
+  tm_dots(size = 0.2, legend.show = FALSE, palette = "Set1")
+
+#plot toronto bike parking with thefts per pop density by ward under
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Thefts_per_pop_density", style = "quantile", palette = "Blues", title = "Thefts per Population Density") +
+  tm_shape(toronto_bikeParking) +
+  tm_dots(size = 0.2, legend.show = FALSE, palette = "Set2", alpha = 0.25) +
+  tm_layout(legend.position = c("left", "bottom"))
+```
+
+
+
+# Methods
+
+For analysis we used Buffer Analysis, Bayesian inference(INLA), Kernel Density Estimate, and Random Forest Classification. Buffer Analysis was to visualize the proximity of bike theft incidents to subway stops, bus stops, and bike parking facilities. We used buffer analysis to create areas around our points of interest and then plot the points on a map. INLA was used to try and model the seasonal aspect of our data and see if we could predict how the data would look in the next couple years. Kernel Density Estimate was to see if there were any hot spots of bike thefts in Toronto. It was done with and with and without population density to see if there was a difference. Random Forest Classification was used to try and predict if a bike theft happened in the high density wards of Toronto or not. We grouped the highest theft wards into one group and had any thefts in that area be a 1 and any thefts outside of that area be a 0. This was our response variable.
+
+# Results
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#KDE for bicycle thefts
+bicycle_thefts_sf = st_as_sf(BicycleThefts, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
+bicycle_thefts_transformed <- st_transform(bicycle_thefts_sf, crs = 32617)
+
+toronto_border_st <- st_transform(toronto_border, crs = 32617)
+window <- as.owin(toronto_border_st)
+
+#convert to .ppp object
+bicycle_thefts_ppp = bicycle_thefts_transformed |> 
+  st_coordinates() |>
+  as.ppp( W = window )
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+kde1 <- density.ppp(bicycle_thefts_ppp) |>
+  terra::rast()
+
+crs(kde1) = "EPSG:4547"
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#plot kde
+tm_shape(kde1) +
+  tm_raster() +
+  tm_shape(toronto_border) +
+  tm_borders()
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#Buffer analysis for bike parking
+
+# Assuming you have already transformed bike thefts to UTM zone 17N (EPSG:32617)
+# Transform other datasets to the same CRS
+subway_stops <- st_transform(toronto_subwayStops, crs = 32617)
+bus_stops <- st_transform(toronto_busStops, crs = 32617)
+bike_parking <- st_transform(toronto_bikeParking, crs = 32617)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# Add unique IDs to buffers
+bike_parking_buffers <- st_buffer(bike_parking, dist = 200)
+bike_parking_buffers$id <- seq_len(nrow(bike_parking_buffers))  # Unique ID for each buffer
+
+subway_buffers <- st_buffer(subway_stops, dist = 200)
+subway_buffers$id <- seq_len(nrow(subway_buffers))
+
+bus_buffers <- st_buffer(bus_stops, dist = 200)
+bus_buffers$id <- seq_len(nrow(bus_buffers))
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# Join bike thefts with bike parking buffers
+thefts_in_parking_buffers <- st_join(bicycle_thefts_transformed, bike_parking_buffers)
+
+# Summarize thefts within bike parking buffers
+thefts_in_parking_summary <- thefts_in_parking_buffers %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarize(num_thefts = n(), .groups = 'drop')
+
+# Repeat for subway and bus buffers
+thefts_in_subway_buffers <- st_join(bicycle_thefts_transformed, subway_buffers)
+thefts_in_subway_summary <- thefts_in_subway_buffers %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarize(num_thefts = n(), .groups = 'drop')
+
+thefts_in_bus_buffers <- st_join(bicycle_thefts_transformed, bus_buffers)
+thefts_in_bus_summary <- thefts_in_bus_buffers %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarize(num_thefts = n(), .groups = 'drop')
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+print(thefts_in_parking_summary)
+print(thefts_in_subway_summary)
+print(thefts_in_bus_summary)
+
+```
+
+## Buffer Analysis
+
+```{r}
+ggplot() +
+  geom_sf(data = bus_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_bus_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Bus Stops")
+```
+
+```{r}
+#plot bike thefts near bike parking facilities with population density under
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Population_Density", style = "quantile", palette = "Blues", title = "Population Density (people/sq km)") +
+  tm_shape(bike_parking_buffers) +
+  tm_fill(col = "black", alpha = 0.5) +
+  tm_shape(thefts_in_parking_summary) +
+  tm_dots(col = "red", size = 0.1, alpha = 0.1) +
+  tm_layout(legend.position = c("left", "bottom"))
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# Example for bike parking
+ggplot() +
+  geom_sf(data = bike_parking_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_parking_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Bike Parking Facilities")
+
+# Repeat for subway and bus stops
+ggplot() +
+  geom_sf(data = subway_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_subway_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Subway Stops")
+
+ggplot() +
+  geom_sf(data = bus_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_bus_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Bus Stops")
+
+#plot bike thefts near bike parking facilities with population density under
+tm_shape(toronto_ward_info) +
+  tm_polygons(col = "Population_Density", style = "quantile", palette = "Blues", title = "Population Density (people/sq km)") +
+  tm_shape(bike_parking_buffers) +
+  tm_fill(col = "black", alpha = 0.5) +
+  tm_shape(thefts_in_parking_summary) +
+  tm_dots(col = "red", size = 0.1, alpha = 0.1) +
+  tm_layout(legend.position = c("left", "bottom"))
+
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# Bar plot of theft counts in bike parking buffers
+ggplot(thefts_in_parking_summary, aes(x = id, y = num_thefts)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Thefts in Bike Parking Buffers", x = "Buffer ID", y = "Number of Thefts")
+
+# Bar plot of theft counts in subway buffers
+ggplot(thefts_in_subway_summary, aes(x = id, y = num_thefts)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Thefts in Transit Buffers", x = "Buffer ID", y = "Number of Thefts")
+
+# Bar plot of theft counts in bus buffers
+ggplot(thefts_in_bus_summary, aes(x = id, y = num_thefts)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Thefts in Bus Buffers", x = "Buffer ID", y = "Number of Thefts")
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# Combine summaries for bike parking and subway
+combined_summary <- thefts_in_parking_summary %>%
+  mutate(buffer_type = "Bike Parking") %>%
+  bind_rows(
+    thefts_in_subway_summary %>%
+      mutate(buffer_type = "Subway")
+  )
+
+# Statistical test or regression model
+# Example: t-test (assuming normality)
+t.test(num_thefts ~ buffer_type, data = combined_summary)
+
+# Repeat for bus stops
+combined_summary <- thefts_in_parking_summary %>%
+  mutate(buffer_type = "Bike Parking") %>%
+  bind_rows(
+    thefts_in_bus_summary %>%
+      mutate(buffer_type = "Bus")
+  )
+    
+t.test(num_thefts ~ buffer_type, data = combined_summary)
+
+# Repeat for subway and bus stops
+combined_summary <- thefts_in_subway_summary %>%
+  mutate(buffer_type = "Subway") %>%
+  bind_rows(
+    thefts_in_bus_summary %>%
+      mutate(buffer_type = "Bus")
+  )
+    
+t.test(num_thefts ~ buffer_type, data = combined_summary)
+
+
+
+```
+
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# barplot of thefts by year
+BicycleThefts %>%
+  mutate(OCC_YEAR = as.numeric(as.character(OCC_YEAR))) %>%
+  ggplot(aes(x = OCC_YEAR)) +
+  geom_bar() +
+  labs(title = "Bicycle Thefts by Year", x = "Year", y = "Number of Thefts")
+
+#barplot of thefts by month
+BicycleThefts %>%
+  mutate(OCC_MONTH = month(OCC_DATE, label = TRUE)) %>%
+  ggplot(aes(x = OCC_MONTH)) +
+  geom_bar() +
+  labs(title = "Bicycle Thefts by Month", x = "Month", y = "Number of Thefts")
+
+#line graph of thefts over each for for entire period
+ggplot(BicycleTheftsPerDay) +
+  geom_line(aes(x = OCC_DATE_FROM2014, y = thefts)) +
+  labs(title = "Bicycle Thefts Over Time", x = "Days from Start of 2014", y = "Number of Thefts")
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+# Plot the number of thefts per month over time
+ggplot(BicycleTheftsPerMonth, aes(x = YearMonth, y = thefts, group = 1)) +
+  geom_line(color = "blue") +
+  geom_point() +  # Optional: Add points to highlight each month's data
+  labs(title = "Monthly Bicycle Thefts Over Time",
+       x = "Year",
+       y = "Number of Thefts") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#create predicting data for next 4 years
+predict_data = cbind.data.frame(YearMonth = seq.Date(from = as.Date("2024-01-01"), to = as.Date("2027-12-01"), by = "month"),
+                                time_id = seq(121, 168, 1),
+                                time_id2 = seq(121, 168, 1),
+                                thefts = rep(NA,48),
+                                OCC_MONTH = month(seq.Date(from = as.Date("2024-01-01"), to = as.Date("2027-12-01"), by = "month")),
+                                OCC_YEAR = year(seq.Date(from = as.Date("2024-01-01"), to = as.Date("2027-12-01"), by = "month"))
+                                )
+
+time_data_wmiss=rbind.data.frame(BicycleTheftsPerMonth, predict_data)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+time_model_seasonal = inla(thefts ~ 1 + f(time_id, model = "ar1") + f(time_id2, model = "seasonal", season.length = 12), 
+                           data = time_data_wmiss, 
+                           family = "gaussian", 
+                           E = list(time_data_wmiss$time_id2),
+                           control.predictor = list(compute=TRUE))
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+time_data_wmiss$forcasts = time_model_seasonal$summary.fitted.values$mean
+time_data_wmiss$lb = time_model_seasonal$summary.fitted.values[,3]
+time_data_wmiss$ub = time_model_seasonal$summary.fitted.values[,5]
+time_data_wmiss <- time_data_wmiss %>% ungroup()
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+dataForcast <- time_data_wmiss |> filter (YearMonth > as.Date("2023-12-01"))
+dataTheft <- time_data_wmiss |> filter (YearMonth <= as.Date("2023-12-01"))
+```
+
+
+## Bayesian Inference (INLA)
+
+We can see that the amount of bicycle thefts spikes in the summer. This is likely because more people are outside using their bikes, so there are more bikes available to steal. There is a decrease in bike thefts in 2021, 2022 and 2023 which could possibly be explain by the COVID-19 pandemic, where people were not going outside as much. The forecast for the next 4 years does show the seasonality of the data, but does not identify a general trend of the years.
+
+```{r, fig.cap = "Bicycle Thefts by Month."}
+BicycleThefts %>%
+  mutate(OCC_MONTH = month(OCC_DATE, label = TRUE)) %>%
+  ggplot(aes(x = OCC_MONTH)) +
+  geom_line(stat = "count", group = 1) +
+  geom_point(stat = "count") +
+  labs(title = "Bicycle Thefts by Month", x = "Month", y = "Number of Thefts") +
+  theme_minimal()
+
+```
+
+```{r, fig.cap = "Bicycle Thefts Over Time with Predicted Values."}
+
+ggplot() +
+  geom_line(data = dataForcast, aes(x = YearMonth, y = forcasts), col = "red", lwd = 0.8) +
+  geom_ribbon(data = dataForcast, aes(ymin = lb, ymax = ub, x = YearMonth), fill = "red", alpha = 0.4) +
+  geom_line(data = dataTheft, aes(x = YearMonth, y = thefts), col = "blue", lwd = 0.8) +
+  theme_bw() +
+  labs(y = "Number of Thefts", x = "Year")
+```
+
+## Kernel Density Estimate
+
+While there is the tiniest difference between the two Kernel Density Estimates, it is not enough to say that there is a difference and including population density in the KDE is not necessary. Both plots show that the highest density of bike thefts is in the downtown area of Toronto. Since we accounted for a higher population density it could be not the population of Toronto that matters, but the amount of people coming through Toronto on a daily basis
+
+
+```{r, warning=FALSE, fig.cap="Kernel Density Estimate of Bicycle Thefts in Toronto."}
+#plot kde
+tm_shape(kde1) +
+  tm_raster() +
+  tm_shape(toronto_border) +
+  tm_borders()
+```
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#KDE with population density
+bicycle_thefts_with_wards_sf = st_as_sf(BicycleThefts_with_wards, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
+bicycle_thefts_with_wards_transformed <- st_transform(bicycle_thefts_with_wards_sf, crs = 32617)
+
+toronto_border_st <- st_transform(toronto_border, crs = 32617)
+window <- as.owin(toronto_border_st)
+
+# Filter out rows with NA coordinates and outside points
+valid_points <- st_filter(bicycle_thefts_with_wards_transformed, toronto_border_st)
+
+# Ensure that points have valid coordinates
+valid_points <- valid_points[!is.na(st_coordinates(valid_points)[,1]) & !is.na(st_coordinates(valid_points)[,2]), ]
+
+# Convert valid points to ppp object
+bicycle_thefts_with_wards_ppp <- as.ppp(
+  st_coordinates(valid_points),
+  W = window
+)
+
+# Attach the corresponding population density as weights
+bicycle_thefts_with_wards_ppp$marks <- valid_points$Population_Density
+
+# Perform KDE with Population Density as weights
+kde_with_pop <- density.ppp(bicycle_thefts_with_wards_ppp, weights = bicycle_thefts_with_wards_ppp$marks) |>
+  terra::rast()
+
+# Ensure the CRS is correctly set
+crs(kde_with_pop) <- "EPSG:32617"
+
+# Plotting the KDE with population density
+tm_shape(kde_with_pop) +
+  tm_raster(palette = "YlOrRd") +
+  tm_shape(toronto_border_st) +
+  tm_borders()
+
+```
+
+```{r, fig.cap="Kernel Density Estimate of Bicycle Thefts in Toronto with Population Density."}
+# Plotting the KDE with population density
+tm_shape(kde_with_pop) +
+  tm_raster(palette = "YlOrRd") +
+  tm_shape(toronto_border_st) +
+  tm_borders()
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#MLM
+
+#regrab data so I remember what the hell I have
+print(BicycleThefts_with_wards)
+print(toronto_busStops)
+print(toronto_subwayStops)
+print(toronto_bikeParking)
+print(toronto_subwayLines)
+```
+
+
+```{r, cache = TRUE, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#get distance from nearest bike parking
+
+# Calculate distances from each bike theft to all bike parking facilities
+distances_to_parking <- st_distance(BicycleThefts_with_wards, toronto_bikeParking)
+
+# Convert distances to a matrix
+distances_matrix <- as.matrix(distances_to_parking)
+
+# Find the minimum distance for each bike theft (distance to the nearest bike parking)
+BicycleThefts_with_wards$dist_to_bike_parking <- apply(distances_matrix, 1, min) |> units::set_units(m)
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#get distance from nearest subway stop and the subway line it is on (toronto_subwayStops$subwayLine)
+
+# Calculate distances from each bike theft to all subway stops
+distances_to_subway <- st_distance(BicycleThefts_with_wards, toronto_subwayStops)
+
+# Convert distances to a matrix
+distances_matrix <- as.matrix(distances_to_subway)
+
+# Find the minimum distance for each bike theft (distance to the nearest subway stop)
+BicycleThefts_with_wards$dist_to_subway <- apply(distances_matrix, 1, min) |> units::set_units(m)
+
+# Find the subway line for each bike theft
+BicycleThefts_with_wards$subway_line <- apply(distances_matrix, 1, function(x) toronto_subwayStops$subwayLine[which.min(x)])
+
+
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+#get distance from nearest bus stop
+
+# Calculate distances from each bike theft to all bus stops
+distances_to_bus <- st_distance(BicycleThefts_with_wards, toronto_busStops)
+
+# Convert distances to a matrix
+distances_matrix <- as.matrix(distances_to_bus)
+
+# Find the minimum distance for each bike theft (distance to the nearest bus stop)
+BicycleThefts_with_wards$dist_to_bus <- apply(distances_matrix, 1, min) |> units::set_units(m)
+
+```
+
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+bike_theft_model_data <- BicycleThefts_with_wards |>
+  dplyr::select(BIKE_TYPE, PREMISES_TYPE, OCC_DAY, OCC_YEAR, OCC_MONTH, OCC_HOUR, OCC_DOW, ward_id)#, geometry)
+
+#if bike theft is in ward 13, 10, 11, or 14, set it to 1, else 0
+bike_theft_model_data$is_downtown <- ifelse(bike_theft_model_data$ward_id %in% c("13", "10", "11", "14"), 1, 0)
+bike_theft_model_data$is_downtown <- sapply(bike_theft_model_data$is_downtown, as.factor)
+
+#remove ward_id
+bike_theft_model_data <- bike_theft_model_data |>
+  dplyr::select(-c(ward_id))
+
+bike_theft_model_data$BIKE_TYPE <- sapply(bike_theft_model_data$BIKE_TYPE, as.factor)
+bike_theft_model_data$PREMISES_TYPE <- sapply(bike_theft_model_data$PREMISES_TYPE, as.factor)
+bike_theft_model_data$OCC_DAY <- sapply(bike_theft_model_data$OCC_DAY, as.factor)
+bike_theft_model_data$OCC_YEAR <- sapply(bike_theft_model_data$OCC_YEAR, as.factor)
+bike_theft_model_data$OCC_MONTH <- sapply(bike_theft_model_data$OCC_MONTH, as.factor)
+bike_theft_model_data$OCC_HOUR <- sapply(bike_theft_model_data$OCC_HOUR, as.factor)
+bike_theft_model_data$OCC_DOW <- sapply(bike_theft_model_data$OCC_DOW, as.factor)
+
+# Add distance to subway, bus stop, and bike parking
+bike_theft_model_data$dist_to_subway <- sapply(BicycleThefts_with_wards$dist_to_subway, as.numeric)
+bike_theft_model_data$subway_line <- sapply(BicycleThefts_with_wards$subway_line, as.factor)
+bike_theft_model_data$dist_to_bike_parking <- sapply(BicycleThefts_with_wards$dist_to_bike_parking, as.numeric)
+bike_theft_model_data$dist_to_bus <- sapply(BicycleThefts_with_wards$dist_to_bus, as.numeric)
+```
+
+```{r}
+# Convert sf object to data frame
+bike_theft_model_data_df <- as.data.frame(bike_theft_model_data)
+
+# Remove the geometry column
+bike_theft_model_data_df <- bike_theft_model_data_df %>%
+  dplyr::select(-geometry)
+
+# If needed, convert it back to a standard data frame
+bike_theft_model_data_clean <- as.data.frame(bike_theft_model_data_df)
+
+#remove subways line column
+bike_theft_model_data_clean <- bike_theft_model_data_clean |>
+  dplyr::select(-c(subway_line))
+
+#remove na values in ward_id
+#bike_theft_model_data_clean <- bike_theft_model_data_clean |>
+#  dplyr::filter(!is.na(ward_id))
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE, include = FALSE}
+set.seed(123)  # For reproducibility
+trainIndex <- createDataPartition(bike_theft_model_data_clean$is_downtown, p = 0.7, list = FALSE)
+trainData <- bike_theft_model_data_clean[trainIndex, ]
+testData <- bike_theft_model_data_clean[-trainIndex, ]
+```
+
+## Random Forest Classification
+
+The Random Forest Model takes into account the distance to the nearest subway stop, bus stop, and bike parking facility to predict if the theft was downtown or not. It also takes into account the type of bike, the type of premises, the day of the week, the year, the month, and the hour of the theft. The model has an accuracy of around 0.85. It shows that the most important variables are the distance to the subway and the distance to bike parking. There are more subway stations and bike parking in downtown Toronto so this makes sense. We can see the confusion matrix below that shows 5201 true positives, 792 false positives, 687 false negatives, and 3486 true negatives. 
+
+
+```{r, fig.cap="Confusion Matrix."}
+
+# Train Random Forest model
+rf_model <- randomForest(is_downtown ~ ., data = trainData, importance = TRUE)
+ 
+predictions <- predict(rf_model, testData, type = "response")
+
+confusionMatrix(predictions, testData$is_downtown)
+
+# Create a confusion matrix table
+conf_matrix_table <- matrix(c(5201, 792, 687, 3486), nrow = 2, byrow = TRUE,
+                            dimnames = list("Prediction" = c("1", "0"),
+                                            "Reference" = c("1", "0")))
+
+# Convert to a data frame for better presentation
+conf_matrix_df <- as.data.frame(conf_matrix_table)
+
+# Print the table nicely using knitr::kable
+library(knitr)
+kable(conf_matrix_df, caption = "Confusion Matrix")
+```
+
+```{r, fig.cap="Variable Importance."}
+print(importance(rf_model))
+
+```
+
+# Discussion
+
+It seems that regardless of population density the bicycle theft rate does not increase. This goes against what we originally thought. It does seem that more foot traffic does have an effect but that foot traffic is less reflected in the population density and more reflected in the subway and bike amenities.
+
+# Limitations and future work
+
+Our dataset is limited by the available data on bicycle thefts in Toronto. While provided by the Toronto Police Service there is plenty of space for misreporting or under reporting thefts. A police officer who is taking the information from the victim could could have made a mistake when reporting the data. The victim could also give incorrect data, a persons memory is terrible speaking from personal experience. The dataset also had plenty of areas that were missing data or had incorrect data. For example the cost of the bike was often reported as $0. This could be because the victim valued it at $0, or did not care enough to give an accurate estimate on cost.
+
+Another limitation we had was that the dataset only included bike thefts. Obviously it's impossible to know how many bikes were not stolen but it does mean we struggle to make models that predict bike thefts. This leads into our future work.
+
+For future work we would like to predict bike thefts themselves. It may be possible to use population information to create synthetic data to guess what non-stolen bikes exist. Maybe there also is a dataset that fits our needs that we did not find. We would like to create models that predict thefts using Random Forest and Gradient Boosting. We would also like to use the data to create a risk map that shows areas with a higher predicted risk of bike theft. This could be useful for police to allocate resources to areas that need it most.
+
+
+# References
+[1] Toronto Police Service. (2020). Bicycle Theft Statistics Report. 
+
+[2] Piza, E. L., & Kennedy, L. W. (2012). The impact of sample size on the performance of hot spot identification techniques. Applied Geography, 34, 255-270. 
+
+[3] City of Toronto. (2021). Toronto Cycling Plan: 2021-2025. 
+
+[4] Nettleton, S., & Green, J. (2014). Urban cycling and the politics of mobility: Critical perspectives on policies and practices. Transport Policy, 35, 232-239. 
+
+[5] Major crime Indicators open data. (n.d.). https://data.torontopolice.on.ca/datasets/0a239a5563a344a3bbf8452504ed8d68_0/explore 
+
+[6] Neighbourhood crime Rates open data. (n.d.). https://data.torontopolice.on.ca/datasets/ea0cfecdb1de416884e6b0bf08a9e195_0/explore 
+
+[7] Toronto Police Service Public Safety Data Portal. (n.d.). https://data.torontopolice.on.ca/maps/a89d10d5e28444ceb0c8d1d4c0ee39cc 
+
+[8] OpenStreetMap contributors. (Year). OpenStreetMap. Retrieved from https://www.openstreetmap.org 
+
+[9] Open Data Dataset. (n.d.). City of Toronto Open Data Portal. https://open.toronto.ca/dataset/ward-profiles-25-ward-model/ 
+
+ 
