@@ -12,7 +12,7 @@ To satisfy our purpose we used datasets from the open source data of Toronto Pol
  ### 3. Major Crime Indicators (MCI) dataset:
  https://data.torontopolice.on.ca/datasets/TorontoPS::major-crime-indicators-open-data
 
- # Data Pre=processing
+ # Data Pre-processing
 
 The data was decently clean when we got it, but it was missing information we wanted which we got from OpenStreetMap. These were the bus stops, subway stations, and bike parking stands. We also had to calculate the population density of each ward. Most data was merged together based on the ward_id. The OCC_DATE contained a date string that was split into hour, day, month, year. There were a handful of rows with mostly NA values which were removed. The BIKE_COST column had some NA values which were replaced with the mean of the column. We considered replacing them with 0 as a missing value may mean that the owner did not value their bike.
 
